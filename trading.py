@@ -7,7 +7,7 @@ import requests
 import json
 from typing import Dict, List
 from datetime import datetime, timezone
- 
+
 OKX_API_KEY = os.getenv("OKX_API_KEY")
 OKX_SECRET = os.getenv("OKX_SECRET")
 OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE")
@@ -272,10 +272,15 @@ class TradingEngine:
             "posSide": pos_side,
             "ordType": "market",
             "sz": str(contracts),
-            "slTriggerPx": str(sl_price),
-            "slOrdPx": "-1",
-            "tpTriggerPx": str(tp_price),
-            "tpOrdPx": "-1",
+            "attachAlgoOrds": [
+                {
+                    "attachAlgoClOrdId": inst_id.replace("-", "") + str(int(__import__("time").time())),
+                    "tpTriggerPx": str(tp_price),
+                    "tpOrdPx": "-1",
+                    "slTriggerPx": str(sl_price),
+                    "slOrdPx": "-1",
+                }
+            ]
         }
 
         body = json.dumps(order_body)
