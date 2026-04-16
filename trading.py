@@ -1,4 +1,5 @@
 import os
+import math
 import hmac
 import hashlib
 import base64
@@ -10,6 +11,7 @@ from datetime import datetime, timezone
 OKX_API_KEY = os.getenv("OKX_API_KEY")
 OKX_SECRET = os.getenv("OKX_SECRET")
 OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE")
+TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "10"))
 BASE_URL = "https://www.okx.com"
 
 SYMBOLS = [
@@ -93,7 +95,6 @@ class TradingEngine:
             for p in data[period:]:
                 val = p * k + val * (1 - k)
             return val
-
         ema12 = ema(closes, 12)
         ema26 = ema(closes, 26)
         macd_line = ema12 - ema26
@@ -132,6 +133,21 @@ class TradingEngine:
             return "LOW"
         return "NORMAL"
 
+    def get_instrument_info(self, inst_id: str) -> dict:
+        """Get min order size and lot size for instrument"""
+        r = requests.get(f"{BASE_URL}/api/v5/public/instruments", params={
+            "instType": "SPOT", "instId": inst_id
+        })
+        r.raise_for_status()
+        data = r.json()
+        if data.get('code') == '0' and data.get('data'):
+            inst = data['data'][0]
+            return {
+                "min_sz": float(inst.get('minSz', 0.00001)),
+                "lot_sz": float(inst.get('lotSz', 0.00001)),
+            }
+        return {"min_sz": 0.00001, "lot_sz": 0.00001}
+
     def get_market_data(self, inst_id: str) -> dict:
         ticker_r = requests.get(f"{BASE_URL}/api/v5/market/ticker", params={"instId": inst_id})
         ticker_r.raise_for_status()
@@ -145,7 +161,6 @@ class TradingEngine:
 
         rsi_15m = self._calculate_rsi(closes_15m)
         _, _, hist_15m = self._calculate_macd(closes_15m)
-
         rsi_1h = self._calculate_rsi(closes_1h)
         _, _, hist_1h = self._calculate_macd(closes_1h)
         bb_upper, bb_mid, bb_lower = self._calculate_bollinger(closes_1h)
@@ -154,10 +169,8 @@ class TradingEngine:
         ema50 = self._calculate_ema(closes_1h, 50)
         ema200 = self._calculate_ema(closes_1h, 200)
         vol_signal = self._volume_signal(candles_1h_full)
-
         rsi_4h = self._calculate_rsi(closes_4h)
         _, _, hist_4h = self._calculate_macd(closes_4h)
-
         trend = "BULLISH" if ema9 > ema21 > ema50 else "BEARISH" if ema9 < ema21 < ema50 else "SIDEWAYS"
 
         return {
@@ -195,21 +208,45 @@ class TradingEngine:
         return positions
 
     def place_order(self, inst_id: str, side: str, qty: float, price: float) -> dict:
-        sl_price = round(price * (1 - STOP_LOSS_PCT if side.upper() == "BUY" else 1 + STOP_LOSS_PCT), 4)
-        tp_price = round(price * (1 + TAKE_PROFIT_PCT if side.upper() == "BUY" else 1 - TAKE_PROFIT_PCT), 4)
+        """Place spot market order — BUY uses USDT amount, SELL uses coin amount"""
+        inst_info = self.get_instrument_info(inst_id)
+        lot_sz = inst_info['lot_sz']
+        min_sz = inst_info['min_sz']
+
+        sl_price = round(price * (1 - STOP_LOSS_PCT), 6) if side.upper() == "BUY" else round(price * (1 + STOP_LOSS_PCT), 6)
+        tp_price = round(price * (1 + TAKE_PROFIT_PCT), 6) if side.upper() == "BUY" else round(price * (1 - TAKE_PROFIT_PCT), 6)
 
         path = '/api/v5/trade/order'
-        body = json.dumps({
-            "instId": inst_id,
-            "tdMode": "cash",
-            "side": side.lower(),
-            "ordType": "market",
-            "sz": str(qty),
-            "slTriggerPx": str(sl_price),
-            "slOrdPx": "-1",
-            "tpTriggerPx": str(tp_price),
-            "tpOrdPx": "-1",
-        })
+
+        if side.upper() == "BUY":
+            # For market BUY on spot: sz = amount in USDT, tgtCcy = quote_ccy
+            order_body = {
+                "instId": inst_id,
+                "tdMode": "cash",
+                "side": "buy",
+                "ordType": "market",
+                "sz": str(round(TRADE_AMOUNT_USDT, 2)),
+                "tgtCcy": "quote_ccy",
+            }
+        else:
+            # For market SELL on spot: sz = amount in base coin
+            # Round to valid lot size
+            decimals = len(str(lot_sz).rstrip('0').split('.')[-1]) if '.' in str(lot_sz) else 0
+            rounded_qty = math.floor(qty / lot_sz) * lot_sz
+            rounded_qty = round(rounded_qty, decimals)
+
+            if rounded_qty < min_sz:
+                return {"code": "error", "msg": f"Sell qty {rounded_qty} below minimum {min_sz}", "sl_price": sl_price, "tp_price": tp_price}
+
+            order_body = {
+                "instId": inst_id,
+                "tdMode": "cash",
+                "side": "sell",
+                "ordType": "market",
+                "sz": str(rounded_qty),
+            }
+
+        body = json.dumps(order_body)
         r = requests.post(BASE_URL + path, headers=self._headers('POST', path, body), data=body)
         r.raise_for_status()
         result = r.json()
