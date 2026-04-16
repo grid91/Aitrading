@@ -86,18 +86,36 @@ class TradingEngine:
         return list(reversed(r.json().get('data', [])))
 
     def get_instrument_info(self, inst_id: str) -> dict:
-        r = requests.get(f"{BASE_URL}/api/v5/public/instruments", params={
-            "instType": "SWAP", "instId": inst_id
-        })
-        r.raise_for_status()
-        data = r.json()
-        if data.get('code') == '0' and data.get('data'):
-            inst = data['data'][0]
-            return {
-                "ct_val": float(inst.get('ctVal', 1)),
-                "lot_sz": float(inst.get('lotSz', 1)),
-                "min_sz": float(inst.get('minSz', 1)),
-            }
+        # Hardcoded OKX SWAP contract specs (ctVal, lotSz, minSz)
+        KNOWN_SPECS = {
+            "BTC-USDT-SWAP":  {"ct_val": 0.01,  "lot_sz": 1, "min_sz": 1},
+            "ETH-USDT-SWAP":  {"ct_val": 0.1,   "lot_sz": 1, "min_sz": 1},
+            "SOL-USDT-SWAP":  {"ct_val": 1.0,   "lot_sz": 1, "min_sz": 1},
+            "BNB-USDT-SWAP":  {"ct_val": 0.1,   "lot_sz": 1, "min_sz": 1},
+            "XRP-USDT-SWAP":  {"ct_val": 10.0,  "lot_sz": 1, "min_sz": 1},
+            "ADA-USDT-SWAP":  {"ct_val": 10.0,  "lot_sz": 1, "min_sz": 1},
+            "DOGE-USDT-SWAP": {"ct_val": 100.0, "lot_sz": 1, "min_sz": 1},
+            "AVAX-USDT-SWAP": {"ct_val": 1.0,   "lot_sz": 1, "min_sz": 1},
+            "LINK-USDT-SWAP": {"ct_val": 1.0,   "lot_sz": 1, "min_sz": 1},
+            "DOT-USDT-SWAP":  {"ct_val": 1.0,   "lot_sz": 1, "min_sz": 1},
+        }
+        if inst_id in KNOWN_SPECS:
+            return KNOWN_SPECS[inst_id]
+        # Fallback: try API
+        try:
+            r = requests.get(f"{BASE_URL}/api/v5/public/instruments", params={
+                "instType": "SWAP", "instId": inst_id
+            }, timeout=5)
+            data = r.json()
+            if data.get('code') == '0' and data.get('data'):
+                inst = data['data'][0]
+                return {
+                    "ct_val": float(inst.get('ctVal', 1)),
+                    "lot_sz": float(inst.get('lotSz', 1)),
+                    "min_sz": float(inst.get('minSz', 1)),
+                }
+        except Exception:
+            pass
         return {"ct_val": 1, "lot_sz": 1, "min_sz": 1}
 
     def _calculate_rsi(self, closes: list, period: int = 14) -> float:
