@@ -3,7 +3,7 @@ import logging
 import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-from trading import TradingEngine
+from trading import TradingEngine, SYMBOLS
 from ai_brain import AIBrain
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -18,13 +18,11 @@ brain = AIBrain()
 auto_trading_active = False
 auto_task = None
 
-SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
-
 def restricted(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         if ALLOWED_USER_ID and user_id != ALLOWED_USER_ID:
-            await update.message.reply_text("⛔ Unauthorized.")
+            await (update.message or update.callback_query.message).reply_text("⛔ Unauthorized.")
             return
         return await func(update, context)
     return wrapper
@@ -39,14 +37,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📈 Analyze Market", callback_data="analyze"),
          InlineKeyboardButton("📋 Status", callback_data="status")],
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    coins = " • ".join([s.replace("-USDT", "") for s in SYMBOLS])
     await update.message.reply_text(
-        "🤖 *AI Trading Bot Active!* (OKX)\n\n"
-        "I will analyze the market every 15 minutes and trade automatically.\n\n"
-        "Pairs: BTC, ETH, SOL\n\n"
+        "🤖 *AI Trading Bot Pro — OKX*\n\n"
+        f"📊 Coins: {coins}\n"
+        "⏱ Timeframes: 15m + 1H + 4H\n"
+        "📰 News analysis: Enabled\n"
+        "🛡 Stop Loss: 2% | Take Profit: 4%\n\n"
         "Use the buttons below to control me:",
         parse_mode="Markdown",
-        reply_markup=reply_markup
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 @restricted
@@ -74,7 +74,8 @@ async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             text = "📊 *Open Positions:*\n\n"
             for p in pos:
-                text += f"• {p['symbol']}: {p['side']} {p['qty']} @ ${p['entry_price']}\n"
+                pnl_emoji = "🟢" if p['pnl'] >= 0 else "🔴"
+                text += f"• {p['symbol']}: {p['qty']} @ ${p['entry_price']:,.4f} {pnl_emoji} PnL: ${p['pnl']:.2f}\n"
             await msg.reply_text(text, parse_mode="Markdown")
     except Exception as e:
         await msg.reply_text(f"❌ Error: {e}")
@@ -82,20 +83,28 @@ async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @restricted
 async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.callback_query.message
-    await msg.reply_text("🔍 Analyzing market... please wait.")
+    await msg.reply_text("🔍 Analyzing 10 coins across 3 timeframes + news... please wait ~30s")
     try:
         results = []
-        for symbol in SYMBOLS:
-            data = trading.get_market_data(symbol)
-            decision = await brain.analyze(symbol, data)
-            emoji = "🟢" if decision['action'] == "BUY" else "🔴" if decision['action'] == "SELL" else "⏸"
-            results.append(
-                f"{emoji} *{symbol}*\n"
-                f"Price: ${data['price']:,.2f} | RSI: {data['rsi']}\n"
-                f"Decision: {decision['action']} — {decision['reason']}"
-            )
-        text = "📈 *AI Market Analysis (OKX):*\n\n" + "\n\n".join(results)
-        await msg.reply_text(text, parse_mode="Markdown")
+        for inst_id in SYMBOLS:
+            try:
+                data = trading.get_market_data(inst_id)
+                decision = await brain.analyze(inst_id, data)
+                emoji = "🟢" if decision['action'] == "BUY" else "🔴" if decision['action'] == "SELL" else "⏸"
+                coin = inst_id.replace("-USDT", "")
+                results.append(
+                    f"{emoji} *{coin}* — {decision['action']}\n"
+                    f"Price: ${data['price']:,.4f} | RSI 1H: {data['timeframes']['1h']['rsi']}\n"
+                    f"Confidence: {decision.get('confidence', 0)}% | News: {decision.get('news_sentiment', 'N/A')}\n"
+                    f"_{decision['reason']}_"
+                )
+            except Exception as e:
+                results.append(f"⚠️ {inst_id}: Error — {e}")
+
+        # Split into 2 messages if too long
+        half = len(results) // 2
+        await msg.reply_text("📈 *AI Analysis — Part 1:*\n\n" + "\n\n".join(results[:half]), parse_mode="Markdown")
+        await msg.reply_text("📈 *AI Analysis — Part 2:*\n\n" + "\n\n".join(results[half:]), parse_mode="Markdown")
     except Exception as e:
         await msg.reply_text(f"❌ Analysis error: {e}")
 
@@ -108,8 +117,10 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📋 *Bot Status:*\n\n"
         f"Exchange: OKX\n"
         f"Auto Trading: {state}\n"
-        f"Checking every: 15 minutes\n"
-        f"Pairs: BTC, ETH, SOL\n"
+        f"Interval: Every 15 minutes\n"
+        f"Coins: {len(SYMBOLS)} pairs\n"
+        f"Timeframes: 15m + 1H + 4H\n"
+        f"Stop Loss: 2% | Take Profit: 4%\n"
         f"USDT Available: ${usdt:.2f}",
         parse_mode="Markdown"
     )
@@ -118,28 +129,46 @@ async def auto_trade_loop(app: Application, chat_id: int):
     global auto_trading_active
     while auto_trading_active:
         try:
-            await app.bot.send_message(chat_id, "🔄 Running auto analysis on OKX...")
-            for symbol in SYMBOLS:
-                data = trading.get_market_data(symbol)
-                decision = await brain.analyze(symbol, data)
-                if decision["action"] in ["BUY", "SELL"]:
-                    result = trading.place_order(data['inst_id'], decision["action"], decision["qty"])
-                    code = result.get('code', '?')
-                    if code == '0':
-                        await app.bot.send_message(
-                            chat_id,
-                            f"✅ *Trade Executed on OKX!*\n"
-                            f"Pair: {symbol}\n"
-                            f"Action: {decision['action']}\n"
-                            f"Qty: {decision['qty']}\n"
-                            f"Price: ${data['price']:,.2f}\n"
-                            f"Reason: {decision['reason']}",
-                            parse_mode="Markdown"
-                        )
+            await app.bot.send_message(chat_id, "🔄 *Auto scan starting — 10 coins...*", parse_mode="Markdown")
+            trades_made = 0
+            for inst_id in SYMBOLS:
+                if not auto_trading_active:
+                    break
+                try:
+                    data = trading.get_market_data(inst_id)
+                    decision = await brain.analyze(inst_id, data)
+                    coin = inst_id.replace("-USDT", "")
+
+                    if decision["action"] in ["BUY", "SELL"]:
+                        result = trading.place_order(inst_id, decision["action"], decision["qty"], data['price'])
+                        code = result.get('code', '?')
+                        if code == '0':
+                            trades_made += 1
+                            action_emoji = "🟢 BUY" if decision["action"] == "BUY" else "🔴 SELL"
+                            await app.bot.send_message(
+                                chat_id,
+                                f"✅ *Trade Executed!*\n\n"
+                                f"Coin: {coin}\n"
+                                f"Action: {action_emoji}\n"
+                                f"Price: ${data['price']:,.4f}\n"
+                                f"Qty: {decision['qty']}\n"
+                                f"Stop Loss: ${result.get('sl_price', 'N/A')}\n"
+                                f"Take Profit: ${result.get('tp_price', 'N/A')}\n"
+                                f"Confidence: {decision.get('confidence')}%\n"
+                                f"News: {decision.get('news_sentiment', 'N/A')}\n"
+                                f"Reason: _{decision['reason']}_",
+                                parse_mode="Markdown"
+                            )
+                        else:
+                            await app.bot.send_message(chat_id, f"⚠️ Order failed for {coin}: {result.get('msg', result)}")
                     else:
-                        await app.bot.send_message(chat_id, f"⚠️ Order failed for {symbol}: {result}")
-                else:
-                    await app.bot.send_message(chat_id, f"⏸ {symbol}: HOLD — {decision['reason']}")
+                        logger.info(f"HOLD {inst_id}: {decision['reason']}")
+                except Exception as e:
+                    logger.error(f"Error processing {inst_id}: {e}")
+                await asyncio.sleep(2)  # Small delay between coins
+
+            summary = f"✅ Scan complete — {trades_made} trade(s) executed. Next scan in 15 min."
+            await app.bot.send_message(chat_id, summary)
         except Exception as e:
             await app.bot.send_message(chat_id, f"⚠️ Auto trade error: {e}")
         await asyncio.sleep(900)
@@ -163,8 +192,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             auto_trading_active = True
             auto_task = asyncio.create_task(auto_trade_loop(context.application, chat_id))
             await query.message.reply_text(
-                "🤖 *Auto trading ENABLED on OKX!*\n"
-                "I'll analyze BTC, ETH, SOL every 15 min and trade automatically.",
+                "🤖 *Auto Trading ENABLED!*\n\n"
+                "Scanning 10 coins every 15 minutes\n"
+                "Using 15m + 1H + 4H signals\n"
+                "News analysis active 📰\n"
+                "Stop Loss: 2% | Take Profit: 4% 🛡",
                 parse_mode="Markdown"
             )
         else:
@@ -183,7 +215,7 @@ def main():
     app.add_handler(CommandHandler("analyze", analyze))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CallbackQueryHandler(button_handler))
-    logger.info("OKX Trading Bot started!")
+    logger.info("AI Trading Bot Pro started!")
     app.run_polling()
 
 if __name__ == "__main__":
