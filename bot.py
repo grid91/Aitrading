@@ -171,6 +171,8 @@ async def auto_trade_loop(app: Application, chat_id: int):
 
                     if decision["action"] in ["BUY", "SELL"]:
                         result = trading.place_order(inst_id, decision["action"], 0, data['price'])
+                        await app.bot.send_message(chat_id, f"🔍 {coin} order result:
+{str(result)[:500]}")
                         if result.get('code') == '0':
                             trades_made += 1
                             direction = "🟢 LONG" if decision["action"] == "BUY" else "🔴 SHORT"
