@@ -54,7 +54,7 @@ class TradingEngine:
         body = json.dumps({
             "instId": inst_id,
             "lever": str(LEVERAGE),
-            "mgnMode": "isolated",
+            "mgnMode": "cross",
         })
         r = requests.post(BASE_URL + path, headers=self._headers('POST', path, body), data=body)
         return r.json()
@@ -267,7 +267,7 @@ class TradingEngine:
         path = '/api/v5/trade/order'
         order_body = {
             "instId": inst_id,
-            "tdMode": "isolated",
+            "tdMode": "cross",
             "side": order_side,
             "posSide": pos_side,
             "ordType": "market",
@@ -302,7 +302,7 @@ class TradingEngine:
         path = '/api/v5/trade/order'
         body = json.dumps({
             "instId": inst_id,
-            "tdMode": "isolated",
+            "tdMode": "cross",
             "side": close_side,
             "posSide": pos_side.lower(),
             "ordType": "market",
