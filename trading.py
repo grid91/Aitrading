@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 OKX_API_KEY = os.getenv("OKX_API_KEY")
 OKX_SECRET = os.getenv("OKX_SECRET")
 OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE")
-TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "10"))
+TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "5"))
 LEVERAGE = int(os.getenv("LEVERAGE", "10"))
 BASE_URL = "https://www.okx.com"
 
@@ -66,10 +66,27 @@ class TradingEngine:
         r.raise_for_status()
         data = r.json()
         balances = {}
+        if data.get('code') == '0' and data.get('data'):
+            for detail in data['data'][0]['details']:
+                avail = float(detail.get('availBal', 0))
+                equity = float(detail.get('eq', 0))
+                val = avail if avail > 0 else equity
+                if val > 0:
+                    balances[detail['ccy']] = val
+        return balances
+
+    def get_asset_balance(self) -> Dict[str, float]:
+        """Get funding account balance as fallback"""
+        path = '/api/v5/asset/balances'
+        r = requests.get(BASE_URL + path, headers=self._headers('GET', path))
+        r.raise_for_status()
+        data = r.json()
+        balances = {}
         if data.get('code') == '0':
-            for item in data['data'][0]['details']:
-                if float(item.get('availBal', 0)) > 0:
-                    balances[item['ccy']] = float(item['availBal'])
+            for item in data.get('data', []):
+                avail = float(item.get('availBal', 0))
+                if avail > 0:
+                    balances[item['ccy']] = avail
         return balances
 
     def get_candles(self, inst_id: str, bar: str, limit: int = 100) -> list:
