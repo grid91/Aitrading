@@ -18,7 +18,7 @@ BASE_URL = "https://www.okx.com"
 SYMBOLS = [
     "BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP", "BNB-USDT-SWAP",
     "XRP-USDT-SWAP", "ADA-USDT-SWAP", "DOGE-USDT-SWAP", "AVAX-USDT-SWAP",
-    "LINK-USDT-SWAP", "DOT-USDT-SWAP"
+    "LINK-USDT-SWAP", "TRX-USDT-SWAP"
 ]
 
 STOP_LOSS_PCT = 0.02
@@ -97,7 +97,7 @@ class TradingEngine:
             "DOGE-USDT-SWAP": {"ct_val": 100.0, "lot_sz": 1, "min_sz": 1},
             "AVAX-USDT-SWAP": {"ct_val": 1.0,   "lot_sz": 1, "min_sz": 1},
             "LINK-USDT-SWAP": {"ct_val": 1.0,   "lot_sz": 1, "min_sz": 1},
-            "DOT-USDT-SWAP":  {"ct_val": 1.0,   "lot_sz": 1, "min_sz": 1},
+            "TRX-USDT-SWAP":  {"ct_val": 1000.0, "lot_sz": 1, "min_sz": 1},
         }
         if inst_id in KNOWN_SPECS:
             return KNOWN_SPECS[inst_id]
