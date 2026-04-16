@@ -12,13 +12,12 @@ OKX_API_KEY = os.getenv("OKX_API_KEY")
 OKX_SECRET = os.getenv("OKX_SECRET")
 OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE")
 TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "5"))
-LEVERAGE = int(os.getenv("LEVERAGE", "10"))
 BASE_URL = "https://www.okx.com"
 
 SYMBOLS = [
-    "BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP", "BNB-USDT-SWAP",
-    "XRP-USDT-SWAP", "ADA-USDT-SWAP", "DOGE-USDT-SWAP", "AVAX-USDT-SWAP",
-    "LINK-USDT-SWAP", "TRX-USDT-SWAP"
+    "BTC-USDT", "ETH-USDT", "SOL-USDT", "BNB-USDT",
+    "XRP-USDT", "ADA-USDT", "DOGE-USDT", "AVAX-USDT",
+    "LINK-USDT", "TRX-USDT"
 ]
 
 STOP_LOSS_PCT = 0.02
@@ -48,18 +47,6 @@ class TradingEngine:
             'Content-Type': 'application/json',
         }
 
-    def set_leverage(self, inst_id: str, pos_side: str = "long"):
-        """Set leverage for the instrument"""
-        path = '/api/v5/account/set-leverage'
-        body = json.dumps({
-            "instId": inst_id,
-            "lever": str(LEVERAGE),
-            "mgnMode": "isolated",
-            "posSide": pos_side,
-        })
-        r = requests.post(BASE_URL + path, headers=self._headers('POST', path, body), data=body)
-        return r.json()
-
     def get_balance(self) -> Dict[str, float]:
         path = '/api/v5/account/balance'
         r = requests.get(BASE_URL + path, headers=self._headers('GET', path))
@@ -67,23 +54,7 @@ class TradingEngine:
         data = r.json()
         balances = {}
         if data.get('code') == '0' and data.get('data'):
-            for detail in data['data'][0]['details']:
-                avail = float(detail.get('availBal', 0))
-                equity = float(detail.get('eq', 0))
-                val = avail if avail > 0 else equity
-                if val > 0:
-                    balances[detail['ccy']] = val
-        return balances
-
-    def get_asset_balance(self) -> Dict[str, float]:
-        """Get funding account balance as fallback"""
-        path = '/api/v5/asset/balances'
-        r = requests.get(BASE_URL + path, headers=self._headers('GET', path))
-        r.raise_for_status()
-        data = r.json()
-        balances = {}
-        if data.get('code') == '0':
-            for item in data.get('data', []):
+            for item in data['data'][0]['details']:
                 avail = float(item.get('availBal', 0))
                 if avail > 0:
                     balances[item['ccy']] = avail
@@ -102,39 +73,6 @@ class TradingEngine:
         })
         r.raise_for_status()
         return list(reversed(r.json().get('data', [])))
-
-    def get_instrument_info(self, inst_id: str) -> dict:
-        # Hardcoded OKX SWAP contract specs (ctVal, lotSz, minSz)
-        KNOWN_SPECS = {
-            "BTC-USDT-SWAP":  {"ct_val": 0.01,  "lot_sz": 1, "min_sz": 1},
-            "ETH-USDT-SWAP":  {"ct_val": 0.1,   "lot_sz": 1, "min_sz": 1},
-            "SOL-USDT-SWAP":  {"ct_val": 1.0,   "lot_sz": 1, "min_sz": 1},
-            "BNB-USDT-SWAP":  {"ct_val": 0.1,   "lot_sz": 1, "min_sz": 1},
-            "XRP-USDT-SWAP":  {"ct_val": 10.0,  "lot_sz": 1, "min_sz": 1},
-            "ADA-USDT-SWAP":  {"ct_val": 10.0,  "lot_sz": 1, "min_sz": 1},
-            "DOGE-USDT-SWAP": {"ct_val": 100.0, "lot_sz": 1, "min_sz": 1},
-            "AVAX-USDT-SWAP": {"ct_val": 1.0,   "lot_sz": 1, "min_sz": 1},
-            "LINK-USDT-SWAP": {"ct_val": 1.0,   "lot_sz": 1, "min_sz": 1},
-            "TRX-USDT-SWAP":  {"ct_val": 1000.0, "lot_sz": 1, "min_sz": 1},
-        }
-        if inst_id in KNOWN_SPECS:
-            return KNOWN_SPECS[inst_id]
-        # Fallback: try API
-        try:
-            r = requests.get(f"{BASE_URL}/api/v5/public/instruments", params={
-                "instType": "SWAP", "instId": inst_id
-            }, timeout=5)
-            data = r.json()
-            if data.get('code') == '0' and data.get('data'):
-                inst = data['data'][0]
-                return {
-                    "ct_val": float(inst.get('ctVal', 1)),
-                    "lot_sz": float(inst.get('lotSz', 1)),
-                    "min_sz": float(inst.get('minSz', 1)),
-                }
-        except Exception:
-            pass
-        return {"ct_val": 1, "lot_sz": 1, "min_sz": 1}
 
     def _calculate_rsi(self, closes: list, period: int = 14) -> float:
         if len(closes) < period + 1:
@@ -196,6 +134,20 @@ class TradingEngine:
             return "LOW"
         return "NORMAL"
 
+    def get_instrument_info(self, inst_id: str) -> dict:
+        r = requests.get(f"{BASE_URL}/api/v5/public/instruments", params={
+            "instType": "SPOT", "instId": inst_id
+        })
+        r.raise_for_status()
+        data = r.json()
+        if data.get('code') == '0' and data.get('data'):
+            inst = data['data'][0]
+            return {
+                "min_sz": float(inst.get('minSz', 0.00001)),
+                "lot_sz": float(inst.get('lotSz', 0.00001)),
+            }
+        return {"min_sz": 0.00001, "lot_sz": 0.00001}
+
     def get_market_data(self, inst_id: str) -> dict:
         ticker_r = requests.get(f"{BASE_URL}/api/v5/market/ticker", params={"instId": inst_id})
         ticker_r.raise_for_status()
@@ -238,97 +190,74 @@ class TradingEngine:
         }
 
     def get_open_positions(self) -> List[dict]:
-        path = '/api/v5/account/positions'
-        r = requests.get(BASE_URL + path, headers=self._headers('GET', path))
-        r.raise_for_status()
-        data = r.json()
+        """Get non-zero spot balances as positions"""
+        balances = self.get_balance()
         positions = []
-        if data.get('code') == '0':
-            for p in data['data']:
-                if float(p.get('pos', 0)) != 0:
-                    positions.append({
-                        "symbol": p['instId'],
-                        "side": "LONG" if float(p.get('pos', 0)) > 0 else "SHORT",
-                        "qty": abs(float(p['pos'])),
-                        "entry_price": float(p.get('avgPx', 0)),
-                        "pnl": float(p.get('upl', 0)),
-                        "liq_price": float(p.get('liqPx', 0)) if p.get('liqPx') else 0,
-                    })
+        for ccy, amount in balances.items():
+            if ccy == "USDT":
+                continue
+            inst_id = f"{ccy}-USDT"
+            try:
+                ticker_r = requests.get(f"{BASE_URL}/api/v5/market/ticker", params={"instId": inst_id})
+                if ticker_r.status_code == 200:
+                    price = float(ticker_r.json()['data'][0]['last'])
+                    value = amount * price
+                    if value > 0.5:  # Only show if worth more than $0.50
+                        positions.append({
+                            "symbol": inst_id,
+                            "side": "LONG",
+                            "qty": amount,
+                            "entry_price": price,
+                            "pnl": 0,
+                            "value_usdt": value,
+                        })
+            except:
+                pass
         return positions
 
     def place_order(self, inst_id: str, side: str, qty: float, price: float) -> dict:
-        """Place futures market order with leverage"""
+        """Place spot market order"""
         inst_info = self.get_instrument_info(inst_id)
-        ct_val = inst_info['ct_val']
-        min_sz = inst_info['min_sz']
         lot_sz = inst_info['lot_sz']
+        min_sz = inst_info['min_sz']
 
-        notional = TRADE_AMOUNT_USDT * LEVERAGE
-        raw_contracts = notional / (price * ct_val)
-
-        # Round to valid lot size
-        contracts = math.floor(raw_contracts / lot_sz) * lot_sz
-        contracts = max(contracts, min_sz)
-        if contracts == int(contracts):
-            contracts = int(contracts)
-        if contracts <= 0:
-            contracts = int(min_sz)
-
-        pos_side = "long" if side.upper() == "BUY" else "short"
-        order_side = "buy" if side.upper() == "BUY" else "sell"
-        # Set leverage in isolated mode
-        self.set_leverage(inst_id, pos_side)
-
-        sl_price = round(price * (1 - STOP_LOSS_PCT), 6) if side.upper() == "BUY" else round(price * (1 + STOP_LOSS_PCT), 6)
-        tp_price = round(price * (1 + TAKE_PROFIT_PCT), 6) if side.upper() == "BUY" else round(price * (1 - TAKE_PROFIT_PCT), 6)
+        sl_price = round(price * (1 - STOP_LOSS_PCT), 6)
+        tp_price = round(price * (1 + TAKE_PROFIT_PCT), 6)
 
         path = '/api/v5/trade/order'
-        order_body = {
-            "instId": inst_id,
-            "tdMode": "isolated",
-            "side": order_side,
-            "posSide": pos_side,
-            "ordType": "market",
-            "sz": str(contracts),
-            "attachAlgoOrds": [
-                {
-                    "attachAlgoClOrdId": inst_id.replace("-", "") + str(int(__import__("time").time())),
-                    "tpTriggerPx": str(tp_price),
-                    "tpOrdPx": "-1",
-                    "slTriggerPx": str(sl_price),
-                    "slOrdPx": "-1",
-                }
-            ]
-        }
+
+        if side.upper() == "BUY":
+            # Spend USDT amount directly
+            order_body = {
+                "instId": inst_id,
+                "tdMode": "cash",
+                "side": "buy",
+                "ordType": "market",
+                "sz": str(round(TRADE_AMOUNT_USDT, 2)),
+                "tgtCcy": "quote_ccy",
+            }
+        else:
+            # Sell coin amount
+            decimals = len(str(lot_sz).rstrip('0').split('.')[-1]) if '.' in str(lot_sz) else 0
+            rounded_qty = math.floor(qty / lot_sz) * lot_sz
+            rounded_qty = round(rounded_qty, decimals)
+            if rounded_qty < min_sz:
+                return {"code": "error", "msg": f"Qty {rounded_qty} below min {min_sz}"}
+            order_body = {
+                "instId": inst_id,
+                "tdMode": "cash",
+                "side": "sell",
+                "ordType": "market",
+                "sz": str(rounded_qty),
+            }
 
         body = json.dumps(order_body)
         r = requests.post(BASE_URL + path, headers=self._headers('POST', path, body), data=body)
+        r.raise_for_status()
         result = r.json()
-        # Always return full result for debugging
         result['sl_price'] = sl_price
         result['tp_price'] = tp_price
-        result['contracts'] = contracts
-        result['leverage'] = LEVERAGE
-        result['notional'] = notional
-        result['debug_body'] = order_body
-        result['debug_status'] = r.status_code
         return result
-
-    def close_position(self, inst_id: str, pos_side: str, qty: float) -> dict:
-        """Close an open futures position"""
-        close_side = "sell" if pos_side == "LONG" else "buy"
-        path = '/api/v5/trade/order'
-        body = json.dumps({
-            "instId": inst_id,
-            "tdMode": "isolated",
-            "side": close_side,
-            "posSide": pos_side.lower(),
-            "ordType": "market",
-            "sz": str(int(qty)),
-        })
-        r = requests.post(BASE_URL + path, headers=self._headers('POST', path, body), data=body)
-        r.raise_for_status()
-        return r.json()
 
     def get_usdt_balance(self) -> float:
         return float(self.get_balance().get("USDT", 0))
