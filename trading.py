@@ -2,7 +2,6 @@ import os
 import hmac
 import hashlib
 import base64
-import time
 import requests
 import json
 from typing import Dict, List
@@ -12,6 +11,15 @@ OKX_API_KEY = os.getenv("OKX_API_KEY")
 OKX_SECRET = os.getenv("OKX_SECRET")
 OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE")
 BASE_URL = "https://www.okx.com"
+
+SYMBOLS = [
+    "BTC-USDT", "ETH-USDT", "SOL-USDT", "BNB-USDT",
+    "XRP-USDT", "ADA-USDT", "DOGE-USDT", "AVAX-USDT",
+    "LINK-USDT", "DOT-USDT"
+]
+
+STOP_LOSS_PCT = 0.02
+TAKE_PROFIT_PCT = 0.04
 
 class TradingEngine:
     def __init__(self):
@@ -24,11 +32,7 @@ class TradingEngine:
 
     def _sign(self, timestamp, method, path, body=''):
         message = timestamp + method.upper() + path + (body or '')
-        sig = hmac.new(
-            self.secret.encode(),
-            message.encode(),
-            hashlib.sha256
-        ).digest()
+        sig = hmac.new(self.secret.encode(), message.encode(), hashlib.sha256).digest()
         return base64.b64encode(sig).decode()
 
     def _headers(self, method, path, body=''):
@@ -48,47 +52,24 @@ class TradingEngine:
         data = r.json()
         balances = {}
         if data.get('code') == '0':
-            details = data['data'][0]['details']
-            for item in details:
+            for item in data['data'][0]['details']:
                 if float(item.get('availBal', 0)) > 0:
                     balances[item['ccy']] = float(item['availBal'])
         return balances
 
-    def get_market_data(self, symbol: str) -> dict:
-        # symbol format for OKX: BTC-USDT
-        inst_id = symbol.replace('USDT', '-USDT')
-
-        # Current price
-        ticker_r = requests.get(f"{BASE_URL}/api/v5/market/ticker", params={"instId": inst_id})
-        ticker_r.raise_for_status()
-        ticker = ticker_r.json()['data'][0]
-        price = float(ticker['last'])
-        change_24h = float(ticker['sodUtc8']) if ticker.get('sodUtc8') else 0
-        change_pct = round(((price - change_24h) / change_24h * 100) if change_24h else 0, 2)
-
-        # Candlestick data for indicators
-        candle_r = requests.get(f"{BASE_URL}/api/v5/market/candles", params={
-            "instId": inst_id, "bar": "1H", "limit": "50"
+    def get_candles(self, inst_id: str, bar: str, limit: int = 100) -> list:
+        r = requests.get(f"{BASE_URL}/api/v5/market/candles", params={
+            "instId": inst_id, "bar": bar, "limit": str(limit)
         })
-        candle_r.raise_for_status()
-        candles = candle_r.json()['data']
-        closes = [float(c[4]) for c in reversed(candles)]
+        r.raise_for_status()
+        return [float(c[4]) for c in reversed(r.json().get('data', []))]
 
-        rsi = self._calculate_rsi(closes)
-        sma20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else price
-        sma50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else price
-
-        return {
-            "symbol": symbol,
-            "inst_id": inst_id,
-            "price": price,
-            "rsi": round(rsi, 2),
-            "sma20": round(sma20, 2),
-            "sma50": round(sma50, 2),
-            "trend": "BULLISH" if sma20 > sma50 else "BEARISH",
-            "change_24h": change_pct,
-            "volume_24h": round(float(ticker.get('volCcy24h', 0)), 2),
-        }
+    def get_full_candles(self, inst_id: str, bar: str, limit: int = 100) -> list:
+        r = requests.get(f"{BASE_URL}/api/v5/market/candles", params={
+            "instId": inst_id, "bar": bar, "limit": str(limit)
+        })
+        r.raise_for_status()
+        return list(reversed(r.json().get('data', [])))
 
     def _calculate_rsi(self, closes: list, period: int = 14) -> float:
         if len(closes) < period + 1:
@@ -102,6 +83,98 @@ class TradingEngine:
             return 100.0
         rs = avg_gain / avg_loss
         return 100 - (100 / (1 + rs))
+
+    def _calculate_macd(self, closes: list):
+        def ema(data, period):
+            if len(data) < period:
+                return data[-1] if data else 0
+            k = 2 / (period + 1)
+            val = sum(data[:period]) / period
+            for p in data[period:]:
+                val = p * k + val * (1 - k)
+            return val
+
+        ema12 = ema(closes, 12)
+        ema26 = ema(closes, 26)
+        macd_line = ema12 - ema26
+        macd_values = []
+        for i in range(26, len(closes)):
+            macd_values.append(ema(closes[:i+1], 12) - ema(closes[:i+1], 26))
+        signal = ema(macd_values, 9) if len(macd_values) >= 9 else 0
+        return round(macd_line, 4), round(signal, 4), round(macd_line - signal, 4)
+
+    def _calculate_bollinger(self, closes: list, period: int = 20):
+        if len(closes) < period:
+            return closes[-1], closes[-1], closes[-1]
+        recent = closes[-period:]
+        sma = sum(recent) / period
+        std = (sum((x - sma) ** 2 for x in recent) / period) ** 0.5
+        return round(sma + 2*std, 2), round(sma, 2), round(sma - 2*std, 2)
+
+    def _calculate_ema(self, closes: list, period: int) -> float:
+        if len(closes) < period:
+            return closes[-1] if closes else 0
+        k = 2 / (period + 1)
+        val = sum(closes[:period]) / period
+        for p in closes[period:]:
+            val = p * k + val * (1 - k)
+        return round(val, 4)
+
+    def _volume_signal(self, candles: list) -> str:
+        if len(candles) < 20:
+            return "NORMAL"
+        volumes = [float(c[5]) for c in candles]
+        avg_vol = sum(volumes[-20:-1]) / 19
+        curr_vol = volumes[-1]
+        if curr_vol > avg_vol * 1.5:
+            return "HIGH"
+        elif curr_vol < avg_vol * 0.5:
+            return "LOW"
+        return "NORMAL"
+
+    def get_market_data(self, inst_id: str) -> dict:
+        ticker_r = requests.get(f"{BASE_URL}/api/v5/market/ticker", params={"instId": inst_id})
+        ticker_r.raise_for_status()
+        ticker = ticker_r.json()['data'][0]
+        price = float(ticker['last'])
+
+        closes_15m = self.get_candles(inst_id, "15m", 100)
+        closes_1h = self.get_candles(inst_id, "1H", 100)
+        closes_4h = self.get_candles(inst_id, "4H", 100)
+        candles_1h_full = self.get_full_candles(inst_id, "1H", 100)
+
+        rsi_15m = self._calculate_rsi(closes_15m)
+        _, _, hist_15m = self._calculate_macd(closes_15m)
+
+        rsi_1h = self._calculate_rsi(closes_1h)
+        _, _, hist_1h = self._calculate_macd(closes_1h)
+        bb_upper, bb_mid, bb_lower = self._calculate_bollinger(closes_1h)
+        ema9 = self._calculate_ema(closes_1h, 9)
+        ema21 = self._calculate_ema(closes_1h, 21)
+        ema50 = self._calculate_ema(closes_1h, 50)
+        ema200 = self._calculate_ema(closes_1h, 200)
+        vol_signal = self._volume_signal(candles_1h_full)
+
+        rsi_4h = self._calculate_rsi(closes_4h)
+        _, _, hist_4h = self._calculate_macd(closes_4h)
+
+        trend = "BULLISH" if ema9 > ema21 > ema50 else "BEARISH" if ema9 < ema21 < ema50 else "SIDEWAYS"
+
+        return {
+            "inst_id": inst_id,
+            "price": price,
+            "trend": trend,
+            "volume_signal": vol_signal,
+            "timeframes": {
+                "15m": {"rsi": round(rsi_15m, 2), "macd_hist": hist_15m},
+                "1h": {
+                    "rsi": round(rsi_1h, 2), "macd_hist": hist_1h,
+                    "bb_upper": bb_upper, "bb_mid": bb_mid, "bb_lower": bb_lower,
+                    "ema9": ema9, "ema21": ema21, "ema50": ema50, "ema200": ema200,
+                },
+                "4h": {"rsi": round(rsi_4h, 2), "macd_hist": hist_4h},
+            },
+        }
 
     def get_open_positions(self) -> List[dict]:
         path = '/api/v5/account/positions'
@@ -117,10 +190,14 @@ class TradingEngine:
                         "side": p['posSide'],
                         "qty": float(p['pos']),
                         "entry_price": float(p.get('avgPx', 0)),
+                        "pnl": float(p.get('upl', 0)),
                     })
         return positions
 
-    def place_order(self, inst_id: str, side: str, qty: float) -> dict:
+    def place_order(self, inst_id: str, side: str, qty: float, price: float) -> dict:
+        sl_price = round(price * (1 - STOP_LOSS_PCT if side.upper() == "BUY" else 1 + STOP_LOSS_PCT), 4)
+        tp_price = round(price * (1 + TAKE_PROFIT_PCT if side.upper() == "BUY" else 1 - TAKE_PROFIT_PCT), 4)
+
         path = '/api/v5/trade/order'
         body = json.dumps({
             "instId": inst_id,
@@ -128,15 +205,17 @@ class TradingEngine:
             "side": side.lower(),
             "ordType": "market",
             "sz": str(qty),
+            "slTriggerPx": str(sl_price),
+            "slOrdPx": "-1",
+            "tpTriggerPx": str(tp_price),
+            "tpOrdPx": "-1",
         })
-        r = requests.post(
-            BASE_URL + path,
-            headers=self._headers('POST', path, body),
-            data=body
-        )
+        r = requests.post(BASE_URL + path, headers=self._headers('POST', path, body), data=body)
         r.raise_for_status()
-        return r.json()
+        result = r.json()
+        result['sl_price'] = sl_price
+        result['tp_price'] = tp_price
+        return result
 
     def get_usdt_balance(self) -> float:
-        balance = self.get_balance()
-        return float(balance.get("USDT", 0))
+        return float(self.get_balance().get("USDT", 0))
