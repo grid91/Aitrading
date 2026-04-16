@@ -1,289 +1,151 @@
 import os
-import math
-import hmac
-import hashlib
-import base64
-import requests
 import json
-from typing import Dict, List
-from datetime import datetime, timezone
+import requests
+import anthropic
 
-OKX_API_KEY = os.getenv("OKX_API_KEY")
-OKX_SECRET = os.getenv("OKX_SECRET")
-OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "10"))
-LEVERAGE = int(os.getenv("LEVERAGE", "10"))
-BASE_URL = "https://www.okx.com"
+NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
 
-SYMBOLS = [
-    "BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP", "BNB-USDT-SWAP",
-    "XRP-USDT-SWAP", "ADA-USDT-SWAP", "DOGE-USDT-SWAP", "AVAX-USDT-SWAP",
-    "LINK-USDT-SWAP", "DOT-USDT-SWAP"
-]
-
-STOP_LOSS_PCT = 0.02
-TAKE_PROFIT_PCT = 0.04
-
-class TradingEngine:
+class AIBrain:
     def __init__(self):
-        self.api_key = OKX_API_KEY
-        self.secret = OKX_SECRET
-        self.passphrase = OKX_PASSPHRASE
+        self.client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-    def _get_timestamp(self):
-        return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+    def get_crypto_news(self, symbol: str) -> str:
+        """Fetch latest crypto news for the given symbol"""
+        coin = symbol.replace("-USDT", "")
+        try:
+            if NEWS_API_KEY:
+                r = requests.get(
+                    "https://newsapi.org/v2/everything",
+                    params={
+                        "q": f"{coin} crypto",
+                        "sortBy": "publishedAt",
+                        "pageSize": 5,
+                        "apiKey": NEWS_API_KEY,
+                        "language": "en"
+                    },
+                    timeout=5
+                )
+                if r.status_code == 200:
+                    articles = r.json().get("articles", [])
+                    if articles:
+                        headlines = [a['title'] for a in articles[:5]]
+                        return "\n".join(f"- {h}" for h in headlines)
+            # Fallback: CryptoPanic free API (no key needed)
+            r = requests.get(
+                f"https://cryptopanic.com/api/v1/posts/?auth_token=free&currencies={coin}&kind=news",
+                timeout=5
+            )
+            if r.status_code == 200:
+                results = r.json().get("results", [])
+                headlines = [p['title'] for p in results[:5]]
+                return "\n".join(f"- {h}" for h in headlines)
+        except Exception:
+            pass
+        return "No recent news available"
 
-    def _sign(self, timestamp, method, path, body=''):
-        message = timestamp + method.upper() + path + (body or '')
-        sig = hmac.new(self.secret.encode(), message.encode(), hashlib.sha256).digest()
-        return base64.b64encode(sig).decode()
+    async def analyze(self, inst_id: str, market_data: dict) -> dict:
+        coin = inst_id.replace("-USDT", "")
+        news = self.get_crypto_news(inst_id)
+        tf = market_data['timeframes']
 
-    def _headers(self, method, path, body=''):
-        ts = self._get_timestamp()
-        return {
-            'OK-ACCESS-KEY': self.api_key,
-            'OK-ACCESS-SIGN': self._sign(ts, method, path, body),
-            'OK-ACCESS-TIMESTAMP': ts,
-            'OK-ACCESS-PASSPHRASE': self.passphrase,
-            'Content-Type': 'application/json',
-        }
+        prompt = f"""You are an expert crypto trading AI with deep knowledge of technical analysis.
+Analyze ALL of the following data and make a precise trading decision.
 
-    def set_leverage(self, inst_id: str):
-        """Set leverage for the instrument"""
-        path = '/api/v5/account/set-leverage'
-        body = json.dumps({
-            "instId": inst_id,
-            "lever": str(LEVERAGE),
-            "mgnMode": "cross",
-        })
-        r = requests.post(BASE_URL + path, headers=self._headers('POST', path, body), data=body)
-        return r.json()
+=== COIN: {inst_id} ===
+Current Price: ${market_data['price']:,.4f}
+Overall Trend: {market_data['trend']}
+Volume Signal: {market_data['volume_signal']}
 
-    def get_balance(self) -> Dict[str, float]:
-        path = '/api/v5/account/balance'
-        r = requests.get(BASE_URL + path, headers=self._headers('GET', path))
-        r.raise_for_status()
-        data = r.json()
-        balances = {}
-        if data.get('code') == '0':
-            for item in data['data'][0]['details']:
-                if float(item.get('availBal', 0)) > 0:
-                    balances[item['ccy']] = float(item['availBal'])
-        return balances
+=== TECHNICAL INDICATORS ===
 
-    def get_candles(self, inst_id: str, bar: str, limit: int = 100) -> list:
-        r = requests.get(f"{BASE_URL}/api/v5/market/candles", params={
-            "instId": inst_id, "bar": bar, "limit": str(limit)
-        })
-        r.raise_for_status()
-        return [float(c[4]) for c in reversed(r.json().get('data', []))]
+15-Minute Timeframe:
+- RSI: {tf['15m']['rsi']}
+- MACD Histogram: {tf['15m']['macd_hist']}
 
-    def get_full_candles(self, inst_id: str, bar: str, limit: int = 100) -> list:
-        r = requests.get(f"{BASE_URL}/api/v5/market/candles", params={
-            "instId": inst_id, "bar": bar, "limit": str(limit)
-        })
-        r.raise_for_status()
-        return list(reversed(r.json().get('data', [])))
+1-Hour Timeframe:
+- RSI: {tf['1h']['rsi']}
+- MACD Histogram: {tf['1h']['macd_hist']}
+- Bollinger Upper: ${tf['1h']['bb_upper']}
+- Bollinger Mid: ${tf['1h']['bb_mid']}
+- Bollinger Lower: ${tf['1h']['bb_lower']}
+- EMA 9: ${tf['1h']['ema9']}
+- EMA 21: ${tf['1h']['ema21']}
+- EMA 50: ${tf['1h']['ema50']}
+- EMA 200: ${tf['1h']['ema200']}
 
-    def get_instrument_info(self, inst_id: str) -> dict:
-        r = requests.get(f"{BASE_URL}/api/v5/public/instruments", params={
-            "instType": "SWAP", "instId": inst_id
-        })
-        r.raise_for_status()
-        data = r.json()
-        if data.get('code') == '0' and data.get('data'):
-            inst = data['data'][0]
-            return {
-                "ct_val": float(inst.get('ctVal', 1)),
-                "lot_sz": float(inst.get('lotSz', 1)),
-                "min_sz": float(inst.get('minSz', 1)),
-            }
-        return {"ct_val": 1, "lot_sz": 1, "min_sz": 1}
+4-Hour Timeframe:
+- RSI: {tf['4h']['rsi']}
+- MACD Histogram: {tf['4h']['macd_hist']}
 
-    def _calculate_rsi(self, closes: list, period: int = 14) -> float:
-        if len(closes) < period + 1:
-            return 50.0
-        deltas = [closes[i+1] - closes[i] for i in range(len(closes)-1)]
-        gains = [d if d > 0 else 0 for d in deltas[-period:]]
-        losses = [-d if d < 0 else 0 for d in deltas[-period:]]
-        avg_gain = sum(gains) / period
-        avg_loss = sum(losses) / period
-        if avg_loss == 0:
-            return 100.0
-        rs = avg_gain / avg_loss
-        return 100 - (100 / (1 + rs))
+=== LATEST NEWS ===
+{news}
 
-    def _calculate_macd(self, closes: list):
-        def ema(data, period):
-            if len(data) < period:
-                return data[-1] if data else 0
-            k = 2 / (period + 1)
-            val = sum(data[:period]) / period
-            for p in data[period:]:
-                val = p * k + val * (1 - k)
-            return val
-        ema12 = ema(closes, 12)
-        ema26 = ema(closes, 26)
-        macd_line = ema12 - ema26
-        macd_values = []
-        for i in range(26, len(closes)):
-            macd_values.append(ema(closes[:i+1], 12) - ema(closes[:i+1], 26))
-        signal = ema(macd_values, 9) if len(macd_values) >= 9 else 0
-        return round(macd_line, 4), round(signal, 4), round(macd_line - signal, 4)
+=== TRADING RULES ===
+BUY signals (need at least 3 confirmations):
+- RSI < 35 on 1h or 4h (oversold)
+- MACD histogram turning positive
+- Price near or below Bollinger lower band
+- EMA9 crossing above EMA21
+- Bullish trend
+- Positive/neutral news sentiment
+- High volume on upward movement
 
-    def _calculate_bollinger(self, closes: list, period: int = 20):
-        if len(closes) < period:
-            return closes[-1], closes[-1], closes[-1]
-        recent = closes[-period:]
-        sma = sum(recent) / period
-        std = (sum((x - sma) ** 2 for x in recent) / period) ** 0.5
-        return round(sma + 2*std, 2), round(sma, 2), round(sma - 2*std, 2)
+SELL signals (need at least 2 confirmations):
+- RSI > 70 on 1h or 4h (overbought)
+- MACD histogram turning negative
+- Price near or above Bollinger upper band
+- EMA9 crossing below EMA21
+- Bearish news sentiment
 
-    def _calculate_ema(self, closes: list, period: int) -> float:
-        if len(closes) < period:
-            return closes[-1] if closes else 0
-        k = 2 / (period + 1)
-        val = sum(closes[:period]) / period
-        for p in closes[period:]:
-            val = p * k + val * (1 - k)
-        return round(val, 4)
+HOLD when:
+- Signals are mixed or unclear
+- News is very negative (high risk)
+- Volume is LOW (no conviction)
+- Sideways trend with no clear direction
 
-    def _volume_signal(self, candles: list) -> str:
-        if len(candles) < 20:
-            return "NORMAL"
-        volumes = [float(c[5]) for c in candles]
-        avg_vol = sum(volumes[-20:-1]) / 19
-        curr_vol = volumes[-1]
-        if curr_vol > avg_vol * 1.5:
-            return "HIGH"
-        elif curr_vol < avg_vol * 0.5:
-            return "LOW"
-        return "NORMAL"
+Trade size: ${TRADE_AMOUNT_USDT} USDT
+Qty = {TRADE_AMOUNT_USDT} / current_price (round to 6 decimal places)
 
-    def get_market_data(self, inst_id: str) -> dict:
-        ticker_r = requests.get(f"{BASE_URL}/api/v5/market/ticker", params={"instId": inst_id})
-        ticker_r.raise_for_status()
-        ticker = ticker_r.json()['data'][0]
-        price = float(ticker['last'])
+Respond ONLY with valid JSON:
+{{
+  "action": "BUY" or "SELL" or "HOLD",
+  "qty": 0.000100,
+  "confidence": 85,
+  "signals_confirmed": 4,
+  "reason": "RSI oversold 28 on 1h+4h, MACD turning bullish, price at BB lower, positive news",
+  "news_sentiment": "POSITIVE" or "NEGATIVE" or "NEUTRAL",
+  "risk_level": "LOW" or "MEDIUM" or "HIGH"
+}}
 
-        closes_15m = self.get_candles(inst_id, "15m", 100)
-        closes_1h = self.get_candles(inst_id, "1H", 100)
-        closes_4h = self.get_candles(inst_id, "4H", 100)
-        candles_1h_full = self.get_full_candles(inst_id, "1H", 100)
+Only trade if confidence >= 75 and signals_confirmed >= 3. Otherwise HOLD.
+Only respond with the JSON object, nothing else."""
 
-        rsi_15m = self._calculate_rsi(closes_15m)
-        _, _, hist_15m = self._calculate_macd(closes_15m)
-        rsi_1h = self._calculate_rsi(closes_1h)
-        _, _, hist_1h = self._calculate_macd(closes_1h)
-        bb_upper, bb_mid, bb_lower = self._calculate_bollinger(closes_1h)
-        ema9 = self._calculate_ema(closes_1h, 9)
-        ema21 = self._calculate_ema(closes_1h, 21)
-        ema50 = self._calculate_ema(closes_1h, 50)
-        ema200 = self._calculate_ema(closes_1h, 200)
-        vol_signal = self._volume_signal(candles_1h_full)
-        rsi_4h = self._calculate_rsi(closes_4h)
-        _, _, hist_4h = self._calculate_macd(closes_4h)
-        trend = "BULLISH" if ema9 > ema21 > ema50 else "BEARISH" if ema9 < ema21 < ema50 else "SIDEWAYS"
+        message = self.client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=300,
+            messages=[{"role": "user", "content": prompt}]
+        )
 
-        return {
-            "inst_id": inst_id,
-            "price": price,
-            "trend": trend,
-            "volume_signal": vol_signal,
-            "timeframes": {
-                "15m": {"rsi": round(rsi_15m, 2), "macd_hist": hist_15m},
-                "1h": {
-                    "rsi": round(rsi_1h, 2), "macd_hist": hist_1h,
-                    "bb_upper": bb_upper, "bb_mid": bb_mid, "bb_lower": bb_lower,
-                    "ema9": ema9, "ema21": ema21, "ema50": ema50, "ema200": ema200,
-                },
-                "4h": {"rsi": round(rsi_4h, 2), "macd_hist": hist_4h},
-            },
-        }
+        raw = message.content[0].text.strip().replace("```json", "").replace("```", "").strip()
+        decision = json.loads(raw)
 
-    def get_open_positions(self) -> List[dict]:
-        path = '/api/v5/account/positions'
-        r = requests.get(BASE_URL + path, headers=self._headers('GET', path))
-        r.raise_for_status()
-        data = r.json()
-        positions = []
-        if data.get('code') == '0':
-            for p in data['data']:
-                if float(p.get('pos', 0)) != 0:
-                    positions.append({
-                        "symbol": p['instId'],
-                        "side": "LONG" if float(p.get('pos', 0)) > 0 else "SHORT",
-                        "qty": abs(float(p['pos'])),
-                        "entry_price": float(p.get('avgPx', 0)),
-                        "pnl": float(p.get('upl', 0)),
-                        "liq_price": float(p.get('liqPx', 0)) if p.get('liqPx') else 0,
-                    })
-        return positions
+        # Safety checks
+        if decision.get("confidence", 0) < 75:
+            decision["action"] = "HOLD"
+            decision["reason"] += " (confidence below 75%)"
 
-    def place_order(self, inst_id: str, side: str, qty: float, price: float) -> dict:
-        """Place futures market order with leverage"""
-        # Set leverage first
-        self.set_leverage(inst_id)
+        if decision.get("signals_confirmed", 0) < 3:
+            decision["action"] = "HOLD"
+            decision["reason"] += " (insufficient signal confirmation)"
 
-        # Get instrument info for contract sizing
-        inst_info = self.get_instrument_info(inst_id)
-        ct_val = inst_info['ct_val']
-        min_sz = inst_info['min_sz']
+        if decision.get("risk_level") == "HIGH":
+            decision["action"] = "HOLD"
+            decision["reason"] += " (risk too high)"
 
-        # Calculate number of contracts
-        # contracts = (USDT * leverage) / (price * ct_val)
-        notional = TRADE_AMOUNT_USDT * LEVERAGE
-        contracts = math.floor(notional / (price * ct_val))
-        contracts = max(contracts, int(min_sz))
+        if decision.get("news_sentiment") == "NEGATIVE" and decision["action"] == "BUY":
+            decision["action"] = "HOLD"
+            decision["reason"] += " (negative news — avoiding buy)"
 
-        # Determine position side
-        pos_side = "long" if side.upper() == "BUY" else "short"
-        order_side = "buy" if side.upper() == "BUY" else "sell"
-
-        # SL/TP prices
-        sl_price = round(price * (1 - STOP_LOSS_PCT), 4) if side.upper() == "BUY" else round(price * (1 + STOP_LOSS_PCT), 4)
-        tp_price = round(price * (1 + TAKE_PROFIT_PCT), 4) if side.upper() == "BUY" else round(price * (1 - TAKE_PROFIT_PCT), 4)
-
-        path = '/api/v5/trade/order'
-        order_body = {
-            "instId": inst_id,
-            "tdMode": "cross",
-            "side": order_side,
-            "posSide": pos_side,
-            "ordType": "market",
-            "sz": str(contracts),
-            "slTriggerPx": str(sl_price),
-            "slOrdPx": "-1",
-            "tpTriggerPx": str(tp_price),
-            "tpOrdPx": "-1",
-        }
-
-        body = json.dumps(order_body)
-        r = requests.post(BASE_URL + path, headers=self._headers('POST', path, body), data=body)
-        r.raise_for_status()
-        result = r.json()
-        result['sl_price'] = sl_price
-        result['tp_price'] = tp_price
-        result['contracts'] = contracts
-        result['leverage'] = LEVERAGE
-        result['notional'] = notional
-        return result
-
-    def close_position(self, inst_id: str, pos_side: str, qty: float) -> dict:
-        """Close an open futures position"""
-        close_side = "sell" if pos_side == "LONG" else "buy"
-        path = '/api/v5/trade/order'
-        body = json.dumps({
-            "instId": inst_id,
-            "tdMode": "cross",
-            "side": close_side,
-            "posSide": pos_side.lower(),
-            "ordType": "market",
-            "sz": str(int(qty)),
-        })
-        r = requests.post(BASE_URL + path, headers=self._headers('POST', path, body), data=body)
-        r.raise_for_status()
-        return r.json()
-
-    def get_usdt_balance(self) -> float:
-        return float(self.get_balance().get("USDT", 0))
+        return decision
