@@ -1,69 +1,93 @@
 import os
 import hmac
 import hashlib
+import base64
 import time
 import requests
+import json
 from typing import Dict, List
+from datetime import datetime, timezone
 
-BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
-BINANCE_SECRET = os.getenv("BINANCE_SECRET")
-BASE_URL = "https://api.binance.com"
+OKX_API_KEY = os.getenv("OKX_API_KEY")
+OKX_SECRET = os.getenv("OKX_SECRET")
+OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE")
+BASE_URL = "https://www.okx.com"
 
 class TradingEngine:
     def __init__(self):
-        self.api_key = BINANCE_API_KEY
-        self.secret = BINANCE_SECRET
-        self.headers = {"X-MBX-APIKEY": self.api_key}
+        self.api_key = OKX_API_KEY
+        self.secret = OKX_SECRET
+        self.passphrase = OKX_PASSPHRASE
 
-    def _sign(self, params: dict) -> dict:
-        params["timestamp"] = int(time.time() * 1000)
-        query = "&".join(f"{k}={v}" for k, v in params.items())
-        sig = hmac.new(self.secret.encode(), query.encode(), hashlib.sha256).hexdigest()
-        params["signature"] = sig
-        return params
+    def _get_timestamp(self):
+        return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+
+    def _sign(self, timestamp, method, path, body=''):
+        message = timestamp + method.upper() + path + (body or '')
+        sig = hmac.new(
+            self.secret.encode(),
+            message.encode(),
+            hashlib.sha256
+        ).digest()
+        return base64.b64encode(sig).decode()
+
+    def _headers(self, method, path, body=''):
+        ts = self._get_timestamp()
+        return {
+            'OK-ACCESS-KEY': self.api_key,
+            'OK-ACCESS-SIGN': self._sign(ts, method, path, body),
+            'OK-ACCESS-TIMESTAMP': ts,
+            'OK-ACCESS-PASSPHRASE': self.passphrase,
+            'Content-Type': 'application/json',
+        }
 
     def get_balance(self) -> Dict[str, float]:
-        params = self._sign({})
-        r = requests.get(f"{BASE_URL}/api/v3/account", headers=self.headers, params=params)
+        path = '/api/v5/account/balance'
+        r = requests.get(BASE_URL + path, headers=self._headers('GET', path))
         r.raise_for_status()
         data = r.json()
-        return {b["asset"]: b["free"] for b in data["balances"] if float(b["free"]) > 0}
+        balances = {}
+        if data.get('code') == '0':
+            details = data['data'][0]['details']
+            for item in details:
+                if float(item.get('availBal', 0)) > 0:
+                    balances[item['ccy']] = float(item['availBal'])
+        return balances
 
     def get_market_data(self, symbol: str) -> dict:
-        # Get current price
-        price_r = requests.get(f"{BASE_URL}/api/v3/ticker/price", params={"symbol": symbol})
-        price_r.raise_for_status()
-        price = float(price_r.json()["price"])
+        # symbol format for OKX: BTC-USDT
+        inst_id = symbol.replace('USDT', '-USDT')
 
-        # Get klines (candlestick data) for indicators
-        kline_r = requests.get(f"{BASE_URL}/api/v3/klines", params={
-            "symbol": symbol, "interval": "1h", "limit": 50
+        # Current price
+        ticker_r = requests.get(f"{BASE_URL}/api/v5/market/ticker", params={"instId": inst_id})
+        ticker_r.raise_for_status()
+        ticker = ticker_r.json()['data'][0]
+        price = float(ticker['last'])
+        change_24h = float(ticker['sodUtc8']) if ticker.get('sodUtc8') else 0
+        change_pct = round(((price - change_24h) / change_24h * 100) if change_24h else 0, 2)
+
+        # Candlestick data for indicators
+        candle_r = requests.get(f"{BASE_URL}/api/v5/market/candles", params={
+            "instId": inst_id, "bar": "1H", "limit": "50"
         })
-        kline_r.raise_for_status()
-        klines = kline_r.json()
-        closes = [float(k[4]) for k in klines]
+        candle_r.raise_for_status()
+        candles = candle_r.json()['data']
+        closes = [float(c[4]) for c in reversed(candles)]
 
-        # Calculate RSI
         rsi = self._calculate_rsi(closes)
-
-        # Calculate simple moving averages
-        sma20 = sum(closes[-20:]) / 20
-        sma50 = sum(closes[-50:]) / 50
-
-        # 24h change
-        stats_r = requests.get(f"{BASE_URL}/api/v3/ticker/24hr", params={"symbol": symbol})
-        stats_r.raise_for_status()
-        stats = stats_r.json()
+        sma20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else price
+        sma50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else price
 
         return {
             "symbol": symbol,
+            "inst_id": inst_id,
             "price": price,
             "rsi": round(rsi, 2),
             "sma20": round(sma20, 2),
             "sma50": round(sma50, 2),
             "trend": "BULLISH" if sma20 > sma50 else "BEARISH",
-            "change_24h": round(float(stats["priceChangePercent"]), 2),
-            "volume_24h": round(float(stats["quoteVolume"]), 2),
+            "change_24h": change_pct,
+            "volume_24h": round(float(ticker.get('volCcy24h', 0)), 2),
         }
 
     def _calculate_rsi(self, closes: list, period: int = 14) -> float:
@@ -80,37 +104,36 @@ class TradingEngine:
         return 100 - (100 / (1 + rs))
 
     def get_open_positions(self) -> List[dict]:
-        """Get current non-zero balances as positions"""
-        balance = self.get_balance()
+        path = '/api/v5/account/positions'
+        r = requests.get(BASE_URL + path, headers=self._headers('GET', path))
+        r.raise_for_status()
+        data = r.json()
         positions = []
-        for asset, amount in balance.items():
-            if asset == "USDT":
-                continue
-            symbol = f"{asset}USDT"
-            try:
-                price_r = requests.get(f"{BASE_URL}/api/v3/ticker/price", params={"symbol": symbol})
-                if price_r.status_code == 200:
-                    price = float(price_r.json()["price"])
+        if data.get('code') == '0':
+            for p in data['data']:
+                if float(p.get('pos', 0)) != 0:
                     positions.append({
-                        "symbol": symbol,
-                        "side": "LONG",
-                        "qty": float(amount),
-                        "entry_price": price,
-                        "value_usdt": float(amount) * price
+                        "symbol": p['instId'],
+                        "side": p['posSide'],
+                        "qty": float(p['pos']),
+                        "entry_price": float(p.get('avgPx', 0)),
                     })
-            except:
-                pass
         return positions
 
-    def place_order(self, symbol: str, side: str, qty: float) -> dict:
-        """Place a market order on Binance"""
-        params = self._sign({
-            "symbol": symbol,
-            "side": side,
-            "type": "MARKET",
-            "quantity": qty,
+    def place_order(self, inst_id: str, side: str, qty: float) -> dict:
+        path = '/api/v5/trade/order'
+        body = json.dumps({
+            "instId": inst_id,
+            "tdMode": "cash",
+            "side": side.lower(),
+            "ordType": "market",
+            "sz": str(qty),
         })
-        r = requests.post(f"{BASE_URL}/api/v3/order", headers=self.headers, params=params)
+        r = requests.post(
+            BASE_URL + path,
+            headers=self._headers('POST', path, body),
+            data=body
+        )
         r.raise_for_status()
         return r.json()
 
