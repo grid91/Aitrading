@@ -222,27 +222,29 @@ class TradingEngine:
 
     def place_order(self, inst_id: str, side: str, qty: float, price: float) -> dict:
         """Place futures market order with leverage"""
-        # Set leverage first
         self.set_leverage(inst_id)
 
-        # Get instrument info for contract sizing
         inst_info = self.get_instrument_info(inst_id)
         ct_val = inst_info['ct_val']
         min_sz = inst_info['min_sz']
+        lot_sz = inst_info['lot_sz']
 
-        # Calculate number of contracts
-        # contracts = (USDT * leverage) / (price * ct_val)
         notional = TRADE_AMOUNT_USDT * LEVERAGE
-        contracts = math.floor(notional / (price * ct_val))
-        contracts = max(contracts, int(min_sz))
+        raw_contracts = notional / (price * ct_val)
 
-        # Determine position side
+        # Round to valid lot size
+        contracts = math.floor(raw_contracts / lot_sz) * lot_sz
+        contracts = max(contracts, min_sz)
+        if contracts == int(contracts):
+            contracts = int(contracts)
+        if contracts <= 0:
+            contracts = int(min_sz)
+
         pos_side = "long" if side.upper() == "BUY" else "short"
         order_side = "buy" if side.upper() == "BUY" else "sell"
 
-        # SL/TP prices
-        sl_price = round(price * (1 - STOP_LOSS_PCT), 4) if side.upper() == "BUY" else round(price * (1 + STOP_LOSS_PCT), 4)
-        tp_price = round(price * (1 + TAKE_PROFIT_PCT), 4) if side.upper() == "BUY" else round(price * (1 - TAKE_PROFIT_PCT), 4)
+        sl_price = round(price * (1 - STOP_LOSS_PCT), 6) if side.upper() == "BUY" else round(price * (1 + STOP_LOSS_PCT), 6)
+        tp_price = round(price * (1 + TAKE_PROFIT_PCT), 6) if side.upper() == "BUY" else round(price * (1 - TAKE_PROFIT_PCT), 6)
 
         path = '/api/v5/trade/order'
         order_body = {
