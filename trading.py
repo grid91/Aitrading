@@ -7,7 +7,7 @@ import requests
 import json
 from typing import Dict, List
 from datetime import datetime, timezone
-
+ 
 OKX_API_KEY = os.getenv("OKX_API_KEY")
 OKX_SECRET = os.getenv("OKX_SECRET")
 OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE")
