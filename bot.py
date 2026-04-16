@@ -28,7 +28,7 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
         ["❌ Close All"],
     ],
     resize_keyboard=True,
-    persistent=True
+
 )
 
 def get_inline_menu():
