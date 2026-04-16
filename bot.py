@@ -18,6 +18,8 @@ brain = AIBrain()
 auto_trading_active = False
 auto_task = None
 
+SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+
 def restricted(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
@@ -39,8 +41,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "🤖 *AI Trading Bot Active!*\n\n"
+        "🤖 *AI Trading Bot Active!* (OKX)\n\n"
         "I will analyze the market every 15 minutes and trade automatically.\n\n"
+        "Pairs: BTC, ETH, SOL\n\n"
         "Use the buttons below to control me:",
         parse_mode="Markdown",
         reply_markup=reply_markup
@@ -51,10 +54,12 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.callback_query.message
     try:
         bal = trading.get_balance()
-        text = "💰 *Your Binance Balance:*\n\n"
+        if not bal:
+            await msg.reply_text("💰 No balance found or account empty.")
+            return
+        text = "💰 *Your OKX Balance:*\n\n"
         for asset, amount in bal.items():
-            if float(amount) > 0:
-                text += f"• {asset}: `{float(amount):.4f}`\n"
+            text += f"• {asset}: `{amount:.4f}`\n"
         await msg.reply_text(text, parse_mode="Markdown")
     except Exception as e:
         await msg.reply_text(f"❌ Error fetching balance: {e}")
@@ -79,13 +84,17 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.callback_query.message
     await msg.reply_text("🔍 Analyzing market... please wait.")
     try:
-        symbols = ["BTCUSDT", "ETHUSDT", "BNBUSDT"]
         results = []
-        for symbol in symbols:
+        for symbol in SYMBOLS:
             data = trading.get_market_data(symbol)
             decision = await brain.analyze(symbol, data)
-            results.append(f"*{symbol}*: {decision['action']} — {decision['reason']}")
-        text = "📈 *AI Market Analysis:*\n\n" + "\n\n".join(results)
+            emoji = "🟢" if decision['action'] == "BUY" else "🔴" if decision['action'] == "SELL" else "⏸"
+            results.append(
+                f"{emoji} *{symbol}*\n"
+                f"Price: ${data['price']:,.2f} | RSI: {data['rsi']}\n"
+                f"Decision: {decision['action']} — {decision['reason']}"
+            )
+        text = "📈 *AI Market Analysis (OKX):*\n\n" + "\n\n".join(results)
         await msg.reply_text(text, parse_mode="Markdown")
     except Exception as e:
         await msg.reply_text(f"❌ Analysis error: {e}")
@@ -94,40 +103,46 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.callback_query.message
     state = "🟢 RUNNING" if auto_trading_active else "🔴 STOPPED"
+    usdt = trading.get_usdt_balance()
     await msg.reply_text(
         f"📋 *Bot Status:*\n\n"
+        f"Exchange: OKX\n"
         f"Auto Trading: {state}\n"
         f"Checking every: 15 minutes\n"
-        f"Pairs: BTC, ETH, BNB",
+        f"Pairs: BTC, ETH, SOL\n"
+        f"USDT Available: ${usdt:.2f}",
         parse_mode="Markdown"
     )
 
 async def auto_trade_loop(app: Application, chat_id: int):
     global auto_trading_active
-    symbols = ["BTCUSDT", "ETHUSDT", "BNBUSDT"]
     while auto_trading_active:
         try:
-            await app.bot.send_message(chat_id, "🔄 Running auto analysis...")
-            for symbol in symbols:
+            await app.bot.send_message(chat_id, "🔄 Running auto analysis on OKX...")
+            for symbol in SYMBOLS:
                 data = trading.get_market_data(symbol)
                 decision = await brain.analyze(symbol, data)
                 if decision["action"] in ["BUY", "SELL"]:
-                    result = trading.place_order(symbol, decision["action"], decision["qty"])
-                    await app.bot.send_message(
-                        chat_id,
-                        f"✅ *Trade Executed!*\n"
-                        f"Pair: {symbol}\n"
-                        f"Action: {decision['action']}\n"
-                        f"Qty: {decision['qty']}\n"
-                        f"Reason: {decision['reason']}\n"
-                        f"Order ID: {result.get('orderId', 'N/A')}",
-                        parse_mode="Markdown"
-                    )
+                    result = trading.place_order(data['inst_id'], decision["action"], decision["qty"])
+                    code = result.get('code', '?')
+                    if code == '0':
+                        await app.bot.send_message(
+                            chat_id,
+                            f"✅ *Trade Executed on OKX!*\n"
+                            f"Pair: {symbol}\n"
+                            f"Action: {decision['action']}\n"
+                            f"Qty: {decision['qty']}\n"
+                            f"Price: ${data['price']:,.2f}\n"
+                            f"Reason: {decision['reason']}",
+                            parse_mode="Markdown"
+                        )
+                    else:
+                        await app.bot.send_message(chat_id, f"⚠️ Order failed for {symbol}: {result}")
                 else:
                     await app.bot.send_message(chat_id, f"⏸ {symbol}: HOLD — {decision['reason']}")
         except Exception as e:
             await app.bot.send_message(chat_id, f"⚠️ Auto trade error: {e}")
-        await asyncio.sleep(900)  # 15 minutes
+        await asyncio.sleep(900)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global auto_trading_active, auto_task
@@ -147,7 +162,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not auto_trading_active:
             auto_trading_active = True
             auto_task = asyncio.create_task(auto_trade_loop(context.application, chat_id))
-            await query.message.reply_text("🤖 *Auto trading ENABLED!*\nI'll analyze every 15 min and trade automatically.", parse_mode="Markdown")
+            await query.message.reply_text(
+                "🤖 *Auto trading ENABLED on OKX!*\n"
+                "I'll analyze BTC, ETH, SOL every 15 min and trade automatically.",
+                parse_mode="Markdown"
+            )
         else:
             await query.message.reply_text("⚠️ Auto trading is already running!")
     elif query.data == "auto_off":
@@ -164,7 +183,7 @@ def main():
     app.add_handler(CommandHandler("analyze", analyze))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CallbackQueryHandler(button_handler))
-    logger.info("Bot started!")
+    logger.info("OKX Trading Bot started!")
     app.run_polling()
 
 if __name__ == "__main__":
