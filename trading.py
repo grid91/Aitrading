@@ -280,13 +280,15 @@ class TradingEngine:
 
         body = json.dumps(order_body)
         r = requests.post(BASE_URL + path, headers=self._headers('POST', path, body), data=body)
-        r.raise_for_status()
         result = r.json()
+        # Always return full result for debugging
         result['sl_price'] = sl_price
         result['tp_price'] = tp_price
         result['contracts'] = contracts
         result['leverage'] = LEVERAGE
         result['notional'] = notional
+        result['debug_body'] = order_body
+        result['debug_status'] = r.status_code
         return result
 
     def close_position(self, inst_id: str, pos_side: str, qty: float) -> dict:
