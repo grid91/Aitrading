@@ -38,7 +38,7 @@ qty = {TRADE_AMOUNT_USDT} / current_price, rounded to 6 decimal places.
 Only respond with JSON, nothing else."""
 
         message = self.client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-5",
             max_tokens=200,
             messages=[{"role": "user", "content": prompt}]
         )
