@@ -12,12 +12,13 @@ OKX_API_KEY = os.getenv("OKX_API_KEY")
 OKX_SECRET = os.getenv("OKX_SECRET")
 OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE")
 TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "10"))
+LEVERAGE = int(os.getenv("LEVERAGE", "10"))
 BASE_URL = "https://www.okx.com"
 
 SYMBOLS = [
-    "BTC-USDT", "ETH-USDT", "SOL-USDT", "BNB-USDT",
-    "XRP-USDT", "ADA-USDT", "DOGE-USDT", "AVAX-USDT",
-    "LINK-USDT", "DOT-USDT"
+    "BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP", "BNB-USDT-SWAP",
+    "XRP-USDT-SWAP", "ADA-USDT-SWAP", "DOGE-USDT-SWAP", "AVAX-USDT-SWAP",
+    "LINK-USDT-SWAP", "DOT-USDT-SWAP"
 ]
 
 STOP_LOSS_PCT = 0.02
@@ -47,6 +48,17 @@ class TradingEngine:
             'Content-Type': 'application/json',
         }
 
+    def set_leverage(self, inst_id: str):
+        """Set leverage for the instrument"""
+        path = '/api/v5/account/set-leverage'
+        body = json.dumps({
+            "instId": inst_id,
+            "lever": str(LEVERAGE),
+            "mgnMode": "cross",
+        })
+        r = requests.post(BASE_URL + path, headers=self._headers('POST', path, body), data=body)
+        return r.json()
+
     def get_balance(self) -> Dict[str, float]:
         path = '/api/v5/account/balance'
         r = requests.get(BASE_URL + path, headers=self._headers('GET', path))
@@ -72,6 +84,21 @@ class TradingEngine:
         })
         r.raise_for_status()
         return list(reversed(r.json().get('data', [])))
+
+    def get_instrument_info(self, inst_id: str) -> dict:
+        r = requests.get(f"{BASE_URL}/api/v5/public/instruments", params={
+            "instType": "SWAP", "instId": inst_id
+        })
+        r.raise_for_status()
+        data = r.json()
+        if data.get('code') == '0' and data.get('data'):
+            inst = data['data'][0]
+            return {
+                "ct_val": float(inst.get('ctVal', 1)),
+                "lot_sz": float(inst.get('lotSz', 1)),
+                "min_sz": float(inst.get('minSz', 1)),
+            }
+        return {"ct_val": 1, "lot_sz": 1, "min_sz": 1}
 
     def _calculate_rsi(self, closes: list, period: int = 14) -> float:
         if len(closes) < period + 1:
@@ -133,21 +160,6 @@ class TradingEngine:
             return "LOW"
         return "NORMAL"
 
-    def get_instrument_info(self, inst_id: str) -> dict:
-        """Get min order size and lot size for instrument"""
-        r = requests.get(f"{BASE_URL}/api/v5/public/instruments", params={
-            "instType": "SPOT", "instId": inst_id
-        })
-        r.raise_for_status()
-        data = r.json()
-        if data.get('code') == '0' and data.get('data'):
-            inst = data['data'][0]
-            return {
-                "min_sz": float(inst.get('minSz', 0.00001)),
-                "lot_sz": float(inst.get('lotSz', 0.00001)),
-            }
-        return {"min_sz": 0.00001, "lot_sz": 0.00001}
-
     def get_market_data(self, inst_id: str) -> dict:
         ticker_r = requests.get(f"{BASE_URL}/api/v5/market/ticker", params={"instId": inst_id})
         ticker_r.raise_for_status()
@@ -200,51 +212,51 @@ class TradingEngine:
                 if float(p.get('pos', 0)) != 0:
                     positions.append({
                         "symbol": p['instId'],
-                        "side": p['posSide'],
-                        "qty": float(p['pos']),
+                        "side": "LONG" if float(p.get('pos', 0)) > 0 else "SHORT",
+                        "qty": abs(float(p['pos'])),
                         "entry_price": float(p.get('avgPx', 0)),
                         "pnl": float(p.get('upl', 0)),
+                        "liq_price": float(p.get('liqPx', 0)) if p.get('liqPx') else 0,
                     })
         return positions
 
     def place_order(self, inst_id: str, side: str, qty: float, price: float) -> dict:
-        """Place spot market order — BUY uses USDT amount, SELL uses coin amount"""
+        """Place futures market order with leverage"""
+        # Set leverage first
+        self.set_leverage(inst_id)
+
+        # Get instrument info for contract sizing
         inst_info = self.get_instrument_info(inst_id)
-        lot_sz = inst_info['lot_sz']
+        ct_val = inst_info['ct_val']
         min_sz = inst_info['min_sz']
 
-        sl_price = round(price * (1 - STOP_LOSS_PCT), 6) if side.upper() == "BUY" else round(price * (1 + STOP_LOSS_PCT), 6)
-        tp_price = round(price * (1 + TAKE_PROFIT_PCT), 6) if side.upper() == "BUY" else round(price * (1 - TAKE_PROFIT_PCT), 6)
+        # Calculate number of contracts
+        # contracts = (USDT * leverage) / (price * ct_val)
+        notional = TRADE_AMOUNT_USDT * LEVERAGE
+        contracts = math.floor(notional / (price * ct_val))
+        contracts = max(contracts, int(min_sz))
+
+        # Determine position side
+        pos_side = "long" if side.upper() == "BUY" else "short"
+        order_side = "buy" if side.upper() == "BUY" else "sell"
+
+        # SL/TP prices
+        sl_price = round(price * (1 - STOP_LOSS_PCT), 4) if side.upper() == "BUY" else round(price * (1 + STOP_LOSS_PCT), 4)
+        tp_price = round(price * (1 + TAKE_PROFIT_PCT), 4) if side.upper() == "BUY" else round(price * (1 - TAKE_PROFIT_PCT), 4)
 
         path = '/api/v5/trade/order'
-
-        if side.upper() == "BUY":
-            # For market BUY on spot: sz = amount in USDT, tgtCcy = quote_ccy
-            order_body = {
-                "instId": inst_id,
-                "tdMode": "cash",
-                "side": "buy",
-                "ordType": "market",
-                "sz": str(round(TRADE_AMOUNT_USDT, 2)),
-                "tgtCcy": "quote_ccy",
-            }
-        else:
-            # For market SELL on spot: sz = amount in base coin
-            # Round to valid lot size
-            decimals = len(str(lot_sz).rstrip('0').split('.')[-1]) if '.' in str(lot_sz) else 0
-            rounded_qty = math.floor(qty / lot_sz) * lot_sz
-            rounded_qty = round(rounded_qty, decimals)
-
-            if rounded_qty < min_sz:
-                return {"code": "error", "msg": f"Sell qty {rounded_qty} below minimum {min_sz}", "sl_price": sl_price, "tp_price": tp_price}
-
-            order_body = {
-                "instId": inst_id,
-                "tdMode": "cash",
-                "side": "sell",
-                "ordType": "market",
-                "sz": str(rounded_qty),
-            }
+        order_body = {
+            "instId": inst_id,
+            "tdMode": "cross",
+            "side": order_side,
+            "posSide": pos_side,
+            "ordType": "market",
+            "sz": str(contracts),
+            "slTriggerPx": str(sl_price),
+            "slOrdPx": "-1",
+            "tpTriggerPx": str(tp_price),
+            "tpOrdPx": "-1",
+        }
 
         body = json.dumps(order_body)
         r = requests.post(BASE_URL + path, headers=self._headers('POST', path, body), data=body)
@@ -252,7 +264,26 @@ class TradingEngine:
         result = r.json()
         result['sl_price'] = sl_price
         result['tp_price'] = tp_price
+        result['contracts'] = contracts
+        result['leverage'] = LEVERAGE
+        result['notional'] = notional
         return result
+
+    def close_position(self, inst_id: str, pos_side: str, qty: float) -> dict:
+        """Close an open futures position"""
+        close_side = "sell" if pos_side == "LONG" else "buy"
+        path = '/api/v5/trade/order'
+        body = json.dumps({
+            "instId": inst_id,
+            "tdMode": "cross",
+            "side": close_side,
+            "posSide": pos_side.lower(),
+            "ordType": "market",
+            "sz": str(int(qty)),
+        })
+        r = requests.post(BASE_URL + path, headers=self._headers('POST', path, body), data=body)
+        r.raise_for_status()
+        return r.json()
 
     def get_usdt_balance(self) -> float:
         return float(self.get_balance().get("USDT", 0))
