@@ -48,13 +48,14 @@ class TradingEngine:
             'Content-Type': 'application/json',
         }
 
-    def set_leverage(self, inst_id: str):
+    def set_leverage(self, inst_id: str, pos_side: str = "long"):
         """Set leverage for the instrument"""
         path = '/api/v5/account/set-leverage'
         body = json.dumps({
             "instId": inst_id,
             "lever": str(LEVERAGE),
-            "mgnMode": "cross",
+            "mgnMode": "isolated",
+            "posSide": pos_side,
         })
         r = requests.post(BASE_URL + path, headers=self._headers('POST', path, body), data=body)
         return r.json()
@@ -240,8 +241,6 @@ class TradingEngine:
 
     def place_order(self, inst_id: str, side: str, qty: float, price: float) -> dict:
         """Place futures market order with leverage"""
-        self.set_leverage(inst_id)
-
         inst_info = self.get_instrument_info(inst_id)
         ct_val = inst_info['ct_val']
         min_sz = inst_info['min_sz']
@@ -260,6 +259,8 @@ class TradingEngine:
 
         pos_side = "long" if side.upper() == "BUY" else "short"
         order_side = "buy" if side.upper() == "BUY" else "sell"
+        # Set leverage in isolated mode
+        self.set_leverage(inst_id, pos_side)
 
         sl_price = round(price * (1 - STOP_LOSS_PCT), 6) if side.upper() == "BUY" else round(price * (1 + STOP_LOSS_PCT), 6)
         tp_price = round(price * (1 + TAKE_PROFIT_PCT), 6) if side.upper() == "BUY" else round(price * (1 - TAKE_PROFIT_PCT), 6)
@@ -267,7 +268,7 @@ class TradingEngine:
         path = '/api/v5/trade/order'
         order_body = {
             "instId": inst_id,
-            "tdMode": "cross",
+            "tdMode": "isolated",
             "side": order_side,
             "posSide": pos_side,
             "ordType": "market",
@@ -302,7 +303,7 @@ class TradingEngine:
         path = '/api/v5/trade/order'
         body = json.dumps({
             "instId": inst_id,
-            "tdMode": "cross",
+            "tdMode": "isolated",
             "side": close_side,
             "posSide": pos_side.lower(),
             "ordType": "market",
